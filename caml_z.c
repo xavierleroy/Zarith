@@ -431,7 +431,61 @@ static void ml_z_raise_overflow()
 #define ml_z_raise_divide_by_zero() \
   caml_raise_zero_divide()
 
+/*---------------------------------------------------
+  HELPER FUNCTIONS OVER SINGLE DIGITS
+  ---------------------------------------------------*/
 
+/* Number of leading 0 bits in x */
+
+#ifdef _LONG_LONG_LIMB
+#define BUILTIN_CLZ __builtin_clzll
+#else
+#define BUILTIN_CLZ __builtin_clzl
+#endif
+
+/* Use GCC or Clang built-in if available.  The argument must be != 0. */
+#if defined(__clang__) || __GNUC__ > 3 || (__GNUC__ == 3 && __GNUC_MINOR__ >= 4)
+#define ml_z_clz BUILTIN_CLZ
+#else
+/* Portable C implementation - Hacker's Delight fig 5.12 */
+static int ml_z_clz(mp_limb_t x)
+{
+  int n;
+  mp_limb_t y;
+#ifdef ARCH_SIXTYFOUR
+  n = 64;
+  y = x >> 32;  if (y != 0) { n = n - 32; x = y; }
+#else
+  n = 32;
+#endif
+  y = x >> 16;  if (y != 0) { n = n - 16; x = y; }
+  y = x >>  8;  if (y != 0) { n = n -  8; x = y; }
+  y = x >>  4;  if (y != 0) { n = n -  4; x = y; }
+  y = x >>  2;  if (y != 0) { n = n -  2; x = y; }
+  y = x >>  1;  if (y != 0) return n - 2;
+  return n - x;
+}
+#endif
+
+/* Integer square root */
+
+static mp_limb_t ml_z_isqrt(mp_limb_t x)
+{
+  int s;
+  mp_limb_t g0, g1;
+
+  if (x <= 1) return x;
+  /* Hacker's Delight section 11.1 */
+  s = Z_LIMB_BITS / 2 - ml_z_clz(x - 1) / 2;
+  g0 = (mp_limb_t) 1 << s;    /* g0 = 2^s */
+  g1 = (g0 + (x >> s)) >> 1;  /* g1 = (g0 + x / g0) / 2 */
+//  printf("x = %lu, s = %d, g0 = %lu\n", x, s, g0);
+  while (g1 < g0) {
+    g0 = g1;
+    g1 = (g0 + (x / g0)) >> 1; /* g(n+1) = (g(n) + x / g(n)) / 2 */
+  }
+  return g0;
+}
 
 /*---------------------------------------------------
   CONVERSION FUNCTIONS
@@ -1881,56 +1935,81 @@ CAMLprim value ml_z_pred(value arg)
 
 CAMLprim value ml_z_sqrt(value arg)
 {
-  /* XXX TODO: fast path */
-  CAMLparam1(arg);
-  Z_DECL(arg);
-  value r;
   Z_MARK_OP;
-  Z_MARK_SLOW;
   Z_CHECK(arg);
-  Z_ARG(arg);
-  if (sign_arg)
-    caml_invalid_argument("Z.sqrt: square root of a negative number");
-  if (size_arg) {
-    mp_size_t sz = (size_arg + 1) / 2;
-    r = ml_z_alloc(sz);
-    Z_REFRESH(arg);
-    mpn_sqrtrem(Z_LIMB(r), NULL, ptr_arg, size_arg);
-    r = ml_z_reduce(r, sz, 0);
+#if Z_FAST_PATH
+  if (Is_long(arg)) {
+    intnat a = Long_val(arg);
+    if (a < 0)
+      caml_invalid_argument("Z.sqrt: square root of a negative number");
+    return Val_long(ml_z_isqrt(a));
   }
-  else r = Val_long(0);
-  Z_CHECK(r);
-  CAMLreturn(r);
+#endif
+  /* mpn_ version */
+  Z_MARK_SLOW;
+  {
+    CAMLparam1(arg);
+    value r;
+    Z_DECL(arg);
+    Z_ARG(arg);
+    if (sign_arg)
+      caml_invalid_argument("Z.sqrt: square root of a negative number");
+    if (size_arg) {
+      mp_size_t sz = (size_arg + 1) / 2;
+      r = ml_z_alloc(sz);
+      Z_REFRESH(arg);
+      mpn_sqrtrem(Z_LIMB(r), NULL, ptr_arg, size_arg);
+      r = ml_z_reduce(r, sz, 0);
+    }
+    else r = Val_long(0);
+    Z_CHECK(r);
+    CAMLreturn(r);
+  }
 }
 
 CAMLprim value ml_z_sqrt_rem(value arg)
 {
-  CAMLparam1(arg);
-  CAMLlocal3(r, s, p);
-  Z_DECL(arg);
-  /* XXX TODO: fast path */
   Z_MARK_OP;
-  Z_MARK_SLOW;
   Z_CHECK(arg);
-  Z_ARG(arg);
-  if (sign_arg)
-    caml_invalid_argument("Z.sqrt_rem: square root of a negative number");
-  if (size_arg) {
-    mp_size_t sz = (size_arg + 1) / 2, sz2;
-    r = ml_z_alloc(sz);
-    s = ml_z_alloc(size_arg);
-    Z_REFRESH(arg);
-    sz2 = mpn_sqrtrem(Z_LIMB(r), Z_LIMB(s), ptr_arg, size_arg);
-    r = ml_z_reduce(r, sz, 0);
-    s = ml_z_reduce(s, sz2, 0);
+#if Z_FAST_PATH
+  if (Is_long(arg)) {
+    value p;
+    intnat a = Long_val(arg);
+    if (a < 0)
+      caml_invalid_argument("Z.sqrt_rem: square root of a negative number");
+    mp_limb_t s = ml_z_isqrt(a);
+    p = caml_alloc_small(2,0);
+    Field(p, 0) = Val_long(s);
+    Field(p, 1) = Val_long(a - s * s);
+    return p;
   }
-  else r = s = Val_long(0);
-  Z_CHECK(r);
-  Z_CHECK(s);
-  p = caml_alloc_small(2, 0);
-  Field(p,0) = r;
-  Field(p,1) = s;
-  CAMLreturn(p);
+#endif
+  /* mpn_ version */
+  Z_MARK_SLOW;
+  {
+    CAMLparam1(arg);
+    CAMLlocal3(r, s, p);
+    Z_DECL(arg);
+    Z_ARG(arg);
+    if (sign_arg)
+      caml_invalid_argument("Z.sqrt_rem: square root of a negative number");
+    if (size_arg) {
+      mp_size_t sz = (size_arg + 1) / 2, sz2;
+      r = ml_z_alloc(sz);
+      s = ml_z_alloc(size_arg);
+      Z_REFRESH(arg);
+      sz2 = mpn_sqrtrem(Z_LIMB(r), Z_LIMB(s), ptr_arg, size_arg);
+      r = ml_z_reduce(r, sz, 0);
+      s = ml_z_reduce(s, sz2, 0);
+    }
+    else r = s = Val_long(0);
+    Z_CHECK(r);
+    Z_CHECK(s);
+    p = caml_alloc_small(2, 0);
+    Field(p,0) = r;
+    Field(p,1) = s;
+    CAMLreturn(p);
+  }
 }
 
 CAMLprim value ml_z_gcd(value arg1, value arg2)
@@ -2516,38 +2595,6 @@ CAMLprim value ml_z_shift_right_trunc(value arg, value count)
     CAMLreturn(r);
   }
 }
-
-/* Helper function for numbits: number of leading 0 bits in x */
-
-#ifdef _LONG_LONG_LIMB
-#define BUILTIN_CLZ __builtin_clzll
-#else
-#define BUILTIN_CLZ __builtin_clzl
-#endif
-
-/* Use GCC or Clang built-in if available.  The argument must be != 0. */
-#if defined(__clang__) || __GNUC__ > 3 || (__GNUC__ == 3 && __GNUC_MINOR__ >= 4)
-#define ml_z_clz BUILTIN_CLZ
-#else
-/* Portable C implementation - Hacker's Delight fig 5.12 */
-int ml_z_clz(mp_limb_t x)
-{
-  int n;
-  mp_limb_t y;
-#ifdef ARCH_SIXTYFOUR
-  n = 64;
-  y = x >> 32;  if (y != 0) { n = n - 32; x = y; }
-#else
-  n = 32;
-#endif
-  y = x >> 16;  if (y != 0) { n = n - 16; x = y; }
-  y = x >>  8;  if (y != 0) { n = n -  8; x = y; }
-  y = x >>  4;  if (y != 0) { n = n -  4; x = y; }
-  y = x >>  2;  if (y != 0) { n = n -  2; x = y; }
-  y = x >>  1;  if (y != 0) return n - 2;
-  return n - x;
-}
-#endif
 
 CAMLprim value ml_z_numbits(value arg)
 {
