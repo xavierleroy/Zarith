@@ -2098,52 +2098,90 @@ CAMLprim value ml_z_gcd(value arg1, value arg2)
 /* only computes one cofactor */
 CAMLprim value ml_z_gcdext_intern(value arg1, value arg2)
 {
-  /* XXX TODO: fast path */
-  CAMLparam2(arg1, arg2);
-  CAMLlocal5(r, res_arg1, res_arg2, s, p);
-  Z_DECL(arg1); Z_DECL(arg2);
-  mp_size_t sz, sn;
   Z_MARK_OP;
+  Z_CHECK(arg1); Z_CHECK(arg2);
+#if Z_FAST_PATH
+  if (Is_long(arg1) && Is_long(arg2)) {
+    /* fast path */
+    intnat a1 = Long_val(arg1);
+    intnat a2 = Long_val(arg2);
+    intnat s1 = 1, s2 = 0;
+    int selected;
+    intnat sign;
+    if (a1 < 0) a1 = -a1;
+    if (a2 < 0) a2 = -a2;
+    if (a1 < a2) {
+      intnat t = a1; a1 = a2; a2 = t; selected = 0; sign = arg2;
+    } else {
+      selected = 1; sign = arg1;
+    }
+    while (a2)  {
+      intnat q = a1 / a2;
+      intnat a3 = a1 - q * a2;
+      intnat s3 = s1 - q * s2;
+      a1 = a2; a2 = a3;
+      s1 = s2; s2 = s3;
+    }
+    /* If arg1 = arg2 = min_int, the result a1 is -min_int, not representable
+       as a tagged integer; fall through the slow case, then. */
+    if (a1 <= Z_MAX_INT && s1 <= Z_MAX_INT) {
+      /* Apply sign of argument to s1 */
+      if (Long_val(sign) < 0) s1 = -s1;
+      value p = caml_alloc_small(3, 0);
+      Field(p, 0) = Val_long(a1);
+      Field(p, 1) = Val_long(s1);
+      Field(p, 2) = Val_int(selected);
+      return p;
+    }
+  }
+#endif
+  /* mpn_ version */
   Z_MARK_SLOW;
-  Z_CHECK(arg1);  Z_CHECK(arg2);
-  Z_ARG(arg1);    Z_ARG(arg2);
-  if (!size_arg1 || !size_arg2) ml_z_raise_divide_by_zero();
-  /* copy args to tmp storage */
-  res_arg1 = ml_z_alloc(size_arg1 + 1);
-  res_arg2 = ml_z_alloc(size_arg2 + 1);
-  Z_REFRESH(arg1);
-  Z_REFRESH(arg2);
-  ml_z_cpy_limb(Z_LIMB(res_arg1), ptr_arg1, size_arg1);
-  ml_z_cpy_limb(Z_LIMB(res_arg2), ptr_arg2, size_arg2);
-  /* must have arg1 >= arg2 */
-  if ((size_arg1 > size_arg2) ||
-      ((size_arg1 == size_arg2) &&
-       (mpn_cmp(Z_LIMB(res_arg1), Z_LIMB(res_arg2), size_arg1)  >= 0))) {
-    r = ml_z_alloc(size_arg1 + 1);
-    s = ml_z_alloc(size_arg1 + 1);
-    sz = mpn_gcdext(Z_LIMB(r), Z_LIMB(s), &sn,
-                    Z_LIMB(res_arg1), size_arg1, Z_LIMB(res_arg2), size_arg2);
-    p = caml_alloc_small(3, 0);
-    Field(p,2) = Val_true;
+  {
+    CAMLparam2(arg1, arg2);
+    CAMLlocal5(r, res_arg1, res_arg2, s, p);
+    Z_DECL(arg1); Z_DECL(arg2);
+    mp_size_t sz, sn;
+    Z_CHECK(arg1);  Z_CHECK(arg2);
+    Z_ARG(arg1);    Z_ARG(arg2);
+    if (!size_arg1 || !size_arg2) ml_z_raise_divide_by_zero();
+    /* copy args to tmp storage */
+    res_arg1 = ml_z_alloc(size_arg1 + 1);
+    res_arg2 = ml_z_alloc(size_arg2 + 1);
+    Z_REFRESH(arg1);
+    Z_REFRESH(arg2);
+    ml_z_cpy_limb(Z_LIMB(res_arg1), ptr_arg1, size_arg1);
+    ml_z_cpy_limb(Z_LIMB(res_arg2), ptr_arg2, size_arg2);
+    /* must have arg1 >= arg2 */
+    if ((size_arg1 > size_arg2) ||
+        ((size_arg1 == size_arg2) &&
+         (mpn_cmp(Z_LIMB(res_arg1), Z_LIMB(res_arg2), size_arg1)  >= 0))) {
+      r = ml_z_alloc(size_arg1 + 1);
+      s = ml_z_alloc(size_arg1 + 1);
+      sz = mpn_gcdext(Z_LIMB(r), Z_LIMB(s), &sn,
+                      Z_LIMB(res_arg1), size_arg1, Z_LIMB(res_arg2), size_arg2);
+      p = caml_alloc_small(3, 0);
+      Field(p,2) = Val_true;
+    }
+    else {
+      r = ml_z_alloc(size_arg2 + 1);
+      s = ml_z_alloc(size_arg2 + 1);
+      sz = mpn_gcdext(Z_LIMB(r), Z_LIMB(s), &sn,
+                      Z_LIMB(res_arg2), size_arg2, Z_LIMB(res_arg1), size_arg1);
+      p = caml_alloc_small(3, 0);
+      Field(p,2) = Val_false;
+      sign_arg1 = sign_arg2;
+    }
+    /* pack result */
+    r = ml_z_reduce(r, sz, 0);
+    if ((int)sn >= 0) s = ml_z_reduce(s, sn, sign_arg1);
+    else s = ml_z_reduce(s, -sn, sign_arg1 ^ Z_SIGN_MASK);
+    Z_CHECK(r);
+    Z_CHECK(s);
+    Field(p,0) = r;
+    Field(p,1) = s;
+    CAMLreturn(p);
   }
-  else {
-    r = ml_z_alloc(size_arg2 + 1);
-    s = ml_z_alloc(size_arg2 + 1);
-    sz = mpn_gcdext(Z_LIMB(r), Z_LIMB(s), &sn,
-                    Z_LIMB(res_arg2), size_arg2, Z_LIMB(res_arg1), size_arg1);
-    p = caml_alloc_small(3, 0);
-    Field(p,2) = Val_false;
-    sign_arg1 = sign_arg2;
-  }
-  /* pack result */
-  r = ml_z_reduce(r, sz, 0);
-  if ((int)sn >= 0) s = ml_z_reduce(s, sn, sign_arg1);
-  else s = ml_z_reduce(s, -sn, sign_arg1 ^ Z_SIGN_MASK);
-  Z_CHECK(r);
-  Z_CHECK(s);
-  Field(p,0) = r;
-  Field(p,1) = s;
-  CAMLreturn(p);
 }
 
 
